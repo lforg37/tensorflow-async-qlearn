@@ -19,7 +19,9 @@ class constants:
     epsilon_end     = 0.1
     final_e_frame   = 1000000
     action_repeat   = 4
+    discount_factor = 0.99
+    nb_thread       = 1
 
 class shared:
-    nb_actions       = 0
-
+    nb_actions      = 0
+    game_name       = ''
