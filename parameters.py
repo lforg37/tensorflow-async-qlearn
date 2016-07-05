@@ -2,8 +2,8 @@ class constants:
     input_frames    = 4
     input_size      = 84*84
     conv1_nbfilt    = 32
-    image_shape     = [-1, 84, 84, 1]
-    conv1_shape     = [8, 8, 1, 32]
+    image_shape     = [None, 84, 84, 4]
+    conv1_shape     = [8, 8, 4, 32]
     conv1_zwidth    = 32
     conv1_strides   = [1, 4, 4, 1]
     conv2_shape     = [4, 4, 32, 64]
@@ -20,8 +20,12 @@ class constants:
     final_e_frame   = 1000000
     action_repeat   = 4
     discount_factor = 0.99
-    nb_thread       = 1
+    nb_thread       = 2
+    nb_max_frames   = 80000000
+    batch_size      = 8
+    critic_up_freq  = 64
 
 class shared:
     nb_actions      = 0
     game_name       = ''
+    T               = 0 

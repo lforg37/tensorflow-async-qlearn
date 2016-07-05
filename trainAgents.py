@@ -3,6 +3,7 @@ from ale_python_interface import ALEInterface
 from parameters import shared, constants
 from Agent import AgentThread
 import network
+import tensorflow as tf
 from threading import Lock
 
 def main():
@@ -20,9 +21,13 @@ def main():
     network.createGlobalWeights()
     agent_pool = []
     lock = Lock()
+    session = tf.Session()
 
-    for _ in range(0, constants.nb_thread):
-        agent_pool.append(AgentThread(lock))
+    for i in range(0, constants.nb_thread):
+        agent_pool.append(AgentThread(session, lock, i))
+    network.init_network(session)
+    for agent in agent_pool:
+        agent.start()
 
     
 if __name__ == '__main__':
