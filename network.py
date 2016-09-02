@@ -25,9 +25,6 @@ def createGlobalWeights():
     with tf.variable_scope("conv2"):
         conv_weights_bias(constants.conv2_shape, [constants.conv2_zwidth])
         tf.get_variable_scope().reuse_variables()
-    with tf.variable_scope("conv3"):
-        conv_weights_bias(constants.conv3_shape, [constants.conv3_zwidth])
-        tf.get_variable_scope().reuse_variables()
     with tf.variable_scope("fcl1"):
         fc_weights_bias(constants.cnn_output_size,  constants.fcl1_nbUnit)
         tf.get_variable_scope().reuse_variables()

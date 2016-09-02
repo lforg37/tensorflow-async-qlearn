@@ -18,7 +18,7 @@ def main():
     ale.loadROM(romname)
     nb_actions = len(ale.getMinimalActionSet())
     shared.nb_actions = nb_actions
-    network.createGlobalWeights()
+    network.createGlobalWeights(nb_actions)
     agent_pool = []
     lock = Lock()
     session = tf.Session()
