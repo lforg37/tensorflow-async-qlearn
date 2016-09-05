@@ -21,9 +21,11 @@ class constants:
     critic_up_freq  = 40000
     epsilon_start   = 1
     epsilon_cancel  = 0.1
-    weigthInitStdev = 0.25
+    weightInitStdev = 0.25
     biasInitValue   = 1
-    freq_fresh_eps  = 200    
+    freq_fresh_eps  = 200
+    gradient_clip   = 40
+    updateLock      = True
 
 
 class shared:
