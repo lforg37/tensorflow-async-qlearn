@@ -12,20 +12,28 @@ class constants:
     cnn_output_size = conv2_zwidth * 9 * 9 * 4
     fcl1_nbUnit     = 256
     max_noop        = 30
-    final_e_frame   = 4000000
+    final_e_frame   = 1000000
     action_repeat   = 4
     discount_factor = 0.99
     decay_factor    = 0.99
     nb_max_frames   = 80000000
     batch_size      = 5
-    critic_up_freq  = 40000
+    critic_up_freq  = 10000
     epsilon_start   = 1
     epsilon_cancel  = 0.1
     weightInitStdev = 0.25
     biasInitValue   = 1
     freq_fresh_eps  = 200
     gradient_clip   = 40
+
+    filebas = 'output_agent_'
+
     updateLock      = True
+    lock_T          = True
+    read_lock       = False
+
+    debug_main = False
+    nb_agent   = 16 
 
 
 class shared:

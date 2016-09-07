@@ -63,16 +63,17 @@ class WeightHolder(object):
     """ Class holding weights and rmsprop runing means for the shared network. 
     
     Attributes:
-        params : the shared variable containing the parameters values
+        params: the shared variable containing the parameters values
         learning_rate: a place holder for the shared rmsprop optimizer learning rate
-        rmsprop : the shared rmsprop optimizer
+        rmsprop: the shared rmsprop optimizer
     """
-    def __init__(self, nb_actions, name):
+    def __init__(self, nb_actions = None, name = ''):
         """ Initialise the WeightHolder
         
         Args:
             nb_actions: Number of actions for the considered game
             name: The name prefix for the network variables and optimizer
+            restore_file: path frow which read the saved values
         """
         rng = np.random.RandomState(42)
         
@@ -96,6 +97,18 @@ class WeightHolder(object):
                         fcl1_bias,
                         fcl2_weights,
                         fcl2_bias]
+
+        dict_saver = { 'conv1_weights' : conv1_weights,
+                       'conv1_bias'    : conv1_bias,
+                       'conv2_weights' : conv2_weights,
+                       'conv2_bias'    : conv2_bias,
+                        'fcl1_weights' : fcl1_weights,
+                        'fcl1_bias'    : fcl1_bias,
+                        'fcl2_weights' : fcl2_weights,
+                        'fcl2_bias'    : fcl2_bias
+                    }
+
+        self._saver = tf.train.Saver(dict_saver) 
 
         self._placeholders = []
         for param in self.params():
@@ -122,6 +135,11 @@ class WeightHolder(object):
         for placeholder, updatenode, targetparam in zip(self._placeholders, self._updates, network.params):
             session.run(updatenode, feed_dict = {placeholder : targetparam})
 
+    def restore(self, session, filename):
+        self._saver.restore(session, filename)
+
+    def save(self, session, filename):
+        self._saver.save(session, filename)
 
 class DQN(object):
     """ Computation architecture of deep Q network
@@ -183,7 +201,7 @@ class DQN(object):
             self._assign_list.append(local.assign(shared))
 
     def copy_network(self, session):
-    """ Update the local parameter values according to the WeightHolder values """
+        """ Update the local parameter values according to the WeightHolder values """
         for assign in self._assign_list:
             session.run(assign)
         
@@ -192,42 +210,86 @@ class AgentComputation(object):
     """ Wrapper of useful method for an agent """
 
     def __init__(self, network_holder, critic_holder, session, ident):
-        self.sess = session
-        self.inputs = tf.placeholder(tf.float32)
+        """ Initialisation of the AgentComputation
 
-        with tf.device('/cpu:{0}'.format(ident))
-            self.network = AgentSubNet(network_holder, ident+"_network", self.inputs, session)
-            self.critic  = AgentSubNet(critic_holder,  ident+"_critic",  self.inputs, session)
+        Args:
+            network_holder: WeightHolder of the decision taking, fast evolving network
+            critic_holder:  WeightHolder of the slow evolving evaluating network
+            session: session on which the computations have to be run. Should allow using multiples cpu
+            ident: identifiant of the theano cpu to use.
 
-            self.best_action  = tf.argmax(self.network.output, 0)
-            self.score_critic = tf.reduce_max(self.critic.output)
+        See http://stackoverflow.com/questions/37864081/tensorflow-executing-an-ops-with-a-specific-core-of-a-cpu
+        for setting session properly
+        """
+        self._sess = session
+        self._inputs = tf.placeholder(tf.float32)
+        self._network_holder = network_holder
+        self._critic_holder  = critic_holder
 
-            self.action = tf.placeholder(tf.int32)
-            self.label  = tf.placeholder(tf.float32)
+        with tf.device("/cpu:{}".format(ident)):
+            self._network = DQN(network_holder, ident+"_network", self.inputs, session)
+            self._critic  = DQN(critic_holder,  ident+"_critic",  self.inputs, session)
+
+            self._best_action  = tf.argmax(self._network.output, 0)
+            self._score_critic = tf.reduce_max(self._critic.output)
+
+            self._action = tf.placeholder(tf.int32)
+            self._label  = tf.placeholder(tf.float32)
+
+            self._n = tf.Variable(0)
         
             accumulators = []
         
             for param in network_holder.params:
                 accumulators.append(tf.shared(tf.zeros_like(param)))
 
-            self.reset_acc = [acc.assign(tf.zeros_like(acc)) for acc in accumulators]
+            self._reset_acc = [acc.assign(tf.zeros_like(acc)) for acc in accumulators]
+            self._reset_acc.append(self._n.assign(0))
 
-            network_score = tf.slice(self.network.output, [self.action], [1])
-            loss = 0.5 * tf.square(network_score - self.label) 
+            network_score = tf.slice(self._network.output, [self._action], [1])
+            loss = 0.5 * tf.square(network_score - self._label) 
 
-            gradients = network_holder.rmsprop.compute_gradients(self.loss,
-                                                             self.network.params
+            gradients = network_holder.rmsprop.compute_gradients(loss,
+                                                             self._network.params
                                                             )
-            self.acc_op = []  
+            self._acc_op = []  
             for acc, grad in zip(accumulators, gradients):
-                acc.assign_add(gradients[0])
+                self._acc_op.append(acc.assign_add(gradients[0]))
 
-            acc_caped = [tf.clip_by_value(  acc, 
+            self._acc_op.append(self._n.assign_add(1))
+
+            acc_caped = [tf.clip_by_value(  acc / self._n, 
                                             -constants.gradient_clip, 
                                             constants.gradient_clip
                                         ) for acc in accumulators]
             applyGradList = [(grad, var) for grad, var in zip(acc_caped, network_holder.params)]
 
-            self.applyGradOp = network_holder.rmsprop.apply_gradients(applyGradList)
+            self._applyGradOp = network_holder.rmsprop.apply_gradients(applyGradList)
+
+    def update_critic(self):
+        """Update the evaluating network with the parameters values of the decision taking network""" 
+        self.critic_holder.update(self._network_holder, self._sess)
+
+    def cumulateGradient(self, inputs, actions, label):
+        for op in self._acc_op:
+            self._sess.run(op, feed_dict = {
+                        self._inputs : inputs,
+                        self._action : actions,
+                        self._label  : label
+                    })
+    
+    def getBestAction(self, inputs):
+        return self._sess.run(self._best_action,  feed_dict = {self._inputs : inputs})
+
+    def getCriticScore(self, inputs):
+        return self._sess.run(self._score_critic, feed_dict = {self._inputs : inputs})
+
+    def applyGradient(self, learning_rate):
+        if self._sess.run(self._n) == 0:
+            return;
+
+        self._sess.run(self._applyGradOp, feed_dict = {self.network_holder.learning_rate : learning_rate})
+        for op in self._reset_acc:
+            self._sess.run(op)
 
 

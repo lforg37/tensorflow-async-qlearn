@@ -1,97 +1,144 @@
 import threading
 from parameters import shared, constants
 from ale_python_interface import ALEInterface
-from random import randrange
-from random import random
-from network import AgentSubNet
+from random import randrange, random
+import net_compute
 import numpy as np
-from image_process import resize_tf
-from PIL import Image
+from utils import LockManager
+from improc import BilinearInterpolator2D
+#from PIL import Image
+
+def sample_final_epsilon():
+    """
+    Sample a final epsilon value of epsilon-greedy policy
+    """
+    final_epsilons = np.array([0.1, 0.01, 0.5])
+    probabilities = np.array([0.4, 0.3, 0.3])
+    return np.random.choice(final_epsilons, 1, p=list(probabilities))[0]
 
 class AgentThread(threading.Thread):
-    def __init__(self, session, lock, ident):
-        self.id = ident
+    def __init__(self, mainNet, criticNet, session, tlock, rlock, barrier, ident):
         threading.Thread.__init__(self)
-        self.lock = lock
-        self.ale = ALEInterface()
-        self.ale.setInt(b'random_seed', randrange(0,256,1))
-        self.ale.loadROM(shared.game_name)
-        self.actions = self.ale.getMinimalActionSet()
-        with lock:
-            self.network = AgentSubNet(self.id)
+        self.ident = ident
+        self.rlock = rlock
+        self.barrier = barrier
+        self.computation = net_compute.AgentComputation(mainNet, critic_holder, session, ident)
         self.session = session
-        self.t = 0
+        self.tlock = tlock
 
     def run(self):
-        images     = np.zeros([constants.action_repeat, 210, 160, 1], dtype=np.uint8)
+        ale = ALEInterface()
+        ale.setInt(b'random_seed', randrange(0,256,1))
+        ale.loadROM(shared.game_name)
+        actions = self.ale.getMinimalActionSet()
 
-        current_frame = np.empty([210, 160, 1], dtype=np.uint8)
-        self.ale.getScreenGrayscale(current_frame)
-        #images[:] = current_frame
-        state = resize_tf(images)
-        #Image.fromarray(state[:,:,1]).convert("L").save("new_resized.png")
+        f.open(constants.filebase + str(ident), 'w')
 
-        reward_batch = []
-        action_batch = []
-        state_batch  = []
+        t_lock = LockManager(self.tlock.acquire, self.tlock.release, constants.lock_T)
+        reader_lock = LockManager(self.rlock.acquire, self.rlock.release, constants.read_lock)
+
+        t = 0
+        scores = []
         score = 0
-        with self.lock:
+
+        epsilon_end  = sample_final_epsilon()
+        epsilon      = constants.epsilon_start
+
+        # Epsilon linearlily decrease from one to self.epsilon_end
+        # between frame 0 and frame constants.final_e_frame
+        eps_decrease = -abs(constants.epsilon_start - epsilon_end) / constants.final_e_frame
+
+        interpolator = BilinearInterpolator2D([210,160],[84,84])
+        current_frame = np.empty([210, 160, 1], dtype=np.uint8)
+        ale.getScreenGrayscale(current_frame)
+        
+        next_state    = np.empty([constants.action_repeat, 84, 84, 1], dtype=np.float32)
+        interpolator.interpolate(current_frame, next_state[0])
+        next_state[1:4] = next_state[0]
+
+        with t_lock:
             T = shared.T
             shared.T += 1
-        
-        while T < constants.nb_max_frames and not self.ale.game_over():
-            state_batch.append(state)
-            T = shared.nb_actions
-            epsilon = constants.epsilon_end
-            if T < constants.final_e_frame:
-                epsilon = constants.epsilon_init + T * \
-                    (constants.epsilon_end - constants.epsilon_init) / constants.final_e_frame
 
+        self.barrier.wait()
+    
+        while T < constants.nb_max_frames:
+            t += 1
+            state      = next_state
+            next_state = np.empty_like(state)
+
+            # Determination of epsilon for the current frame
+            epsilon += eps_decrease
+            epsilon = max(epsilon, eps_decrease)
+
+            #Choosing current action based on epsilon greedy behaviour
             rnd = random()
-            action = randrange(0, shared.nb_actions) if rnd < epsilon \
-                     else self.network.computeAction(state[np.newaxis, :, :, :], self.session)
-            action_vect = np.zeros([shared.nb_actions])
-            action_vect[action] = 1
-            action_batch.append(action_vect)
+            if rnd < epsilon:
+                action = randrange(0, len(actions))
+            else:
+                with reader_lock:
+                    action = self.computation.getBestAction(state.transpose(0,3,1,2))[0]
 
             reward = 0
-            i = 0
-            while i < constants.action_repeat and not self.ale.game_over():
-                reward += self.ale.act(self.actions[action])
-                self.ale.getScreenGrayscale(images[i,:,:,:])
+            i      = 0
+
+            #repeating constants.action_repeat times the same action 
+            #and cumulating the rewards 
+            while i < constants.action_repeat and not ale.game_over():
+                reward += ale.act(actions[action])
+                ale.getScreenGrayscale(current_frame)
+                interpolator.interpolate(current_frame, next_state[i])
                 i += 1
-            if i < constants.action_repeat:
-                for k in range(i, constants.action_repeat):
-                    images[k,:,:] = images[i-1, :, :]
-            
-            state = resize_tf(images)
-            #for i in range(0, constants.action_repeat):
-            #    name = "state_" + str(self.t) + "_" + str(i) + ".png"
-            #    Image.fromarray(state[:,:,i]).convert("L").save(name)
-            
-            #Evaluating
-            discounted_reward = 0 if self.ale.game_over() else self.network.computeCritic(state[np.newaxis, :, :, :], self.session)
 
-            reward_batch.append(reward + constants.discount_factor * discounted_reward)
-            
+            while i < constants.action_repeat:
+                next_state[i] = next_state[i-1]
+                i += 1
+
             score += reward
-            if self.ale.game_over():
-                print("Game ended with score of : "+str(score))
-                self.ale.reset_game()
-                score = 0
+
+            discounted_reward = 0
+            if   reward > 0:
+                discounted_reward = 1
+            elif reward < 0:
+                discounted_reward = -1
+
+            if not ale.game_over():
+                #Computing the estimated Q value of the new state
+                with reader_lock:
+                    discounted_reward += constants.discount_factor * \
+                                        self.computation.getCriticScore(next_state.transpose(0,3,1,2))[0]
+
+            computation.cumulateGradient(
+                        state.transpose(0,3,1,2), 
+                        action, 
+                        discounted_reward, ident)
+
+            if t != 0 and (t % constants.batch_size == 0 or ale.game_over()):
+                #computing learning rate for current frame
+                lr = init_learning_rate * (1 - T/constants.nb_max_frames)
+                self.computation.applyGradient(lr)
+                t = 0
+
+            if T % constants.critic_up_freq == 0:
+                f.write("Update critic !\n")
+                f.flush()
+                self.computation.update_critic()
                 
+            #Log some statistics about played games
+            if ale.game_over():
+                f.write("["+str(ident)+"] Game ended with score of : "+str(score) + "\n")
+                f.write("["+str(ident)+"] T : "+str(T)+"\n")
+                ale.reset_game()
+                interpolator.interpolate(current_frame, next_state[0])
+                next_state[1:4] = next_state[0]
+                scores.append(score)
+                if len(scores) >= constants.lenmoy:
+                    moy = sum(scores) / len(scores)
+                    f.write("Average scores for last 12 games for Agent "+str(ident)+ " : " + str(moy)+"\n")
+                    f.flush()
+                    scores = []
+                score = 0
 
-            if self.t % constants.batch_size == 0 or self.ale.game_over():
-                self.network.update(state_batch, action_batch, reward_batch, self.session)
-                reward_batch = []
-                action_batch = []
-                state_batch  = []
-            
-            if self.t % constants.critic_up_freq == 0:
-                self.network.updateCritic(self.session)
-
-            with self.lock: 
-                T = shared.T
-                shared.T += 1
-
-            self.t += 1
+            with t_lock:
+                T = T_glob.value
+                T_glob.value += 1
